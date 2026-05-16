@@ -1,0 +1,268 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Image Processing – HTML + OpenCV.js (Gray → LAB)</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:18px;background:#f7fafc;color:#0f172a}
+    .container{max-width:980px;margin:0 auto;background:white;padding:18px;border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,0.06)}
+    header{display:flex;gap:12px;align-items:center}
+    h1{font-size:20px;margin:0}
+    .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+    .panel{padding:12px;border:1px solid #e6eef6;border-radius:8px}
+    img.preview{max-width:100%;height:auto;border-radius:6px;border:1px solid #e6eef6}
+    canvas{max-width:100%;border:1px solid #e6eef6;border-radius:6px}
+    label{display:block;font-size:12px;margin-bottom:6px}
+    input[type=range]{width:100%}
+    .row{display:flex;gap:8px;align-items:center}
+    button{padding:8px 10px;border-radius:6px;border:0;background:#2563eb;color:white;cursor:pointer}
+    button.secondary{background:#64748b}
+    button:disabled{background:#cbd5e1;cursor:not-allowed}
+    small{color:#475569}
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Image Processing (HTML + OpenCV.js)</h1>
+    <div id="cv-status" style="margin-left:auto">⏳ Loading OpenCV...</div>
+  </header>
+
+  <p>Upload a grayscale image, then click “Convert to LAB” to colorize. Morphology operations and compression still available.</p>
+
+  <div class="controls">
+    <div class="panel">
+      <label>Upload image</label>
+      <input id="fileInput" type="file" accept="image/*"><br><br>
+      <img id="origPreview" class="preview" alt="original preview" src="" />
+      <p><small>Original image preview</small></p>
+    </div>
+
+    <div class="panel">
+      <label>Processed preview</label>
+      <canvas id="outputCanvas"></canvas>
+      <p><small>Processed / result canvas</small></p>
+      <div style="margin-top:8px">
+        <button id="downloadBtn" disabled>Download Result</button>
+        <button id="resetBtn" class="secondary" disabled>Reset</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="row"><label style="min-width:110px">JPEG quality</label>
+        <input id="jpegQuality" type="range" min="0.1" max="1" step="0.05" value="0.8"></div>
+      <div class="row"><label style="min-width:110px">Kernel size</label>
+        <input id="kernelSize" type="range" min="1" max="31" step="2" value="3"></div>
+      <div class="row"><label style="min-width:110px">Iterations</label>
+        <input id="iterations" type="number" min="1" max="10" value="1" style="width:64px"></div>
+    </div>
+  </div>
+
+  <section style="margin-top:14px;display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+    <div class="panel">
+      <h3 style="margin-top:0">Operations</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button data-op="compress" disabled>Compress (JPEG)</button>
+        <button data-op="to_lab" disabled>Convert to LAB</button> <!-- LAB Button -->
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3 style="margin-top:0">Morphology</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button data-op="erode" disabled>Erosion</button>
+        <button data-op="dilate" disabled>Dilation</button>
+        <button data-op="opening" disabled>Opening</button>
+        <button data-op="closing" disabled>Closing</button>
+        <button data-op="hitormiss" disabled>Hit-or-Miss</button>
+      </div>
+      <p style="margin-top:8px"><small>Hit-or-miss works on binarized images.</small></p>
+    </div>
+  </section>
+
+  <footer style="margin-top:14px;text-align:center;color:#94a3b8">
+    Built with OpenCV.js — single-file HTML demo
+  </footer>
+</div>
+
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+<script>
+let cvReady = false;
+const statusEl = document.getElementById('cv-status');
+
+function enableAllButtons() {
+  document.querySelectorAll('button').forEach(b => b.disabled = false);
+}
+
+function onOpenCvReady() {
+  if (cv.getBuildInformation) {
+    cvReady = true;
+    statusEl.textContent = '✅ OpenCV ready';
+    enableAllButtons();
+  } else {
+    cv['onRuntimeInitialized'] = () => {
+      cvReady = true;
+      statusEl.textContent = '✅ OpenCV ready';
+      enableAllButtons();
+    };
+  }
+}
+
+// UI elements
+const fileInput = document.getElementById('fileInput');
+const origPreview = document.getElementById('origPreview');
+const canvas = document.getElementById('outputCanvas');
+const downloadBtn = document.getElementById('downloadBtn');
+const resetBtn = document.getElementById('resetBtn');
+const jpegQuality = document.getElementById('jpegQuality');
+const kernelSizeEl = document.getElementById('kernelSize');
+const iterationsEl = document.getElementById('iterations');
+
+let originalImageURL = null;
+
+function canvasToMat() {
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return cv.matFromImageData(imgData);
+}
+
+function matToCanvas(mat) {
+  cv.imshow(canvas, mat);
+}
+
+function getStructElem(k) {
+  const odd = (k % 2 === 1) ? k : k + 1;
+  return cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(odd, odd));
+}
+
+function binarize(mat) {
+  let gray = new cv.Mat();
+  if (mat.channels() > 1) cv.cvtColor(mat, gray, cv.COLOR_RGB2GRAY);
+  else mat.copyTo(gray);
+  let bin = new cv.Mat();
+  cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+  gray.delete();
+  return bin;
+}
+
+// Load image
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  originalImageURL = url;
+  origPreview.src = url;
+
+  origPreview.onload = () => {
+    canvas.width = origPreview.naturalWidth;
+    canvas.height = origPreview.naturalHeight;
+
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(origPreview, 0, 0);
+
+    let src = canvasToMat();
+
+    // If grayscale, convert to BGR → LAB
+    if (src.channels() === 1) {
+      let bgr = new cv.Mat();
+      cv.cvtColor(src, bgr, cv.COLOR_GRAY2BGR);
+      src.delete();
+      src = bgr;
+    }
+    let lab = new cv.Mat();
+    cv.cvtColor(src, lab, cv.COLOR_BGR2Lab);
+    matToCanvas(lab);
+    src.delete();
+    lab.delete();
+  };
+});
+
+// Operation buttons
+document.querySelectorAll('button[data-op]').forEach(btn => {
+  btn.addEventListener('click', () => runOperation(btn.dataset.op));
+});
+
+function runOperation(op) {
+  if (!cvReady) return alert('⚠️ OpenCV not ready yet!');
+  if (!origPreview.src) return alert('⚠️ Please upload an image.');
+
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(origPreview, 0, 0, canvas.width, canvas.height);
+  let src = canvasToMat();
+  let dst = new cv.Mat();
+
+  try {
+    if (src.channels() === 1)
+      cv.cvtColor(src, src, cv.COLOR_GRAY2BGR);
+
+    // === Compress ===
+    if (op === 'compress') {
+      const q = parseFloat(jpegQuality.value);
+      const dataUrl = canvas.toDataURL('image/jpeg', q);
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0);
+      img.src = dataUrl;
+    }
+
+    // === Convert to LAB ===
+    else if (op === 'to_lab') {
+      let lab = new cv.Mat();
+      cv.cvtColor(src, lab, cv.COLOR_BGR2Lab);
+      matToCanvas(lab);
+      lab.delete();
+    }
+
+    // === Morphology ===
+    else if (['erode', 'dilate', 'opening', 'closing', 'hitormiss'].includes(op)) {
+      cv.cvtColor(src, src, cv.COLOR_RGB2GRAY);
+      const k = Number(kernelSizeEl.value);
+      const iters = Number(iterationsEl.value);
+      const kernel = getStructElem(k);
+
+      if (op === 'erode') cv.erode(src, dst, kernel, new cv.Point(-1, -1), iters);
+      else if (op === 'dilate') cv.dilate(src, dst, kernel, new cv.Point(-1, -1), iters);
+      else if (op === 'opening') cv.morphologyEx(src, dst, cv.MORPH_OPEN, kernel);
+      else if (op === 'closing') cv.morphologyEx(src, dst, cv.MORPH_CLOSE, kernel);
+      else if (op === 'hitormiss') {
+        let bin = binarize(src);
+        cv.morphologyEx(bin, dst, cv.MORPH_HITMISS, kernel);
+        bin.delete();
+      }
+
+      matToCanvas(dst);
+      kernel.delete();
+    }
+
+    dst.delete();
+  } catch (err) {
+    console.error(err);
+    alert('❌ Error: ' + err.message);
+  } finally {
+    src.delete();
+  }
+}
+
+// Download & Reset
+downloadBtn.addEventListener('click', () => {
+  const q = parseFloat(jpegQuality.value);
+  const dataUrl = canvas.toDataURL('image/jpeg', q);
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = 'processed.jpg';
+  a.click();
+});
+
+resetBtn.addEventListener('click', () => {
+  if (!originalImageURL) return;
+  origPreview.src = originalImageURL;
+  origPreview.onload = () => {
+    canvas.width = origPreview.naturalWidth;
+    canvas.height = origPreview.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(origPreview, 0, 0);
+  };
+});
+</script>
+</body>
+</html>
